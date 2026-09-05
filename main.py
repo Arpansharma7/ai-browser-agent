@@ -1,5 +1,3 @@
-# main.py — Industry-optimized: multi-action, streaming, resource blocking,
-# pre-warming, caching, HTTP/2, compact viewport
 import os
 os.environ["BROWSER_USE_TELEMETRY"] = "false"
 os.environ["ANONYMIZED_TELEMETRY"] = "false"
@@ -15,20 +13,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 for n in ("urllib3","httpx","httpcore","openai","playwright","asyncio"): logging.getLogger(n).setLevel(logging.WARNING)
 logger = logging.getLogger("agent")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# GLM response fixer (same as before — unchanged)
-# ═══════════════════════════════════════════════════════════════════════════
 def fix_glm_response(content):
     if not isinstance(content, str) or not content.strip(): return content
     try:
         p = json.loads(content)
         if not isinstance(p, dict): return content
 
-        # Remove thinking fields
         for k in ("thinking", "thought", "reasonning"):
             p.pop(k, None)
 
-        # Move top-level state fields into current_state
         cs = p.get("current_state")
         if not isinstance(cs, dict): cs = {}
         for f in ("evaluation_previous_goal", "memory", "next_goal", "plan"):
@@ -37,17 +30,15 @@ def fix_glm_response(content):
             if f not in cs: cs[f] = ""
         p["current_state"] = cs
 
-        # Ensure action is a list
         a = p.get("action")
         if a is None: p["action"] = [{"type": "wait", "seconds": 1}]
         elif isinstance(a, dict): p["action"] = [a]
         elif not isinstance(a, list): p["action"] = [{"type": "wait", "seconds": 1}]
 
-        # Fix each action's field names and formats
+
         for act in p["action"]:
             if not isinstance(act, dict): continue
 
-            # ═══ FIX: wait must be {"seconds": N} object, not bare integer ═══
             if "wait" in act:
                 w = act["wait"]
                 if isinstance(w, (int, float)):
@@ -62,7 +53,6 @@ def fix_glm_response(content):
                     if "seconds" not in w:
                         w["seconds"] = 1
 
-            # ═══ FIX: done must be {"text": "..."} object, not bare string ═══
             if "done" in act:
                 d = act["done"]
                 if isinstance(d, str):
@@ -79,7 +69,6 @@ def fix_glm_response(content):
                 if "success" not in d:
                     d["success"] = True
 
-            # ═══ FIX: scroll must have amount field ═══
             if "scroll" in act:
                 s = act["scroll"]
                 if not isinstance(s, dict):
@@ -92,20 +81,19 @@ def fix_glm_response(content):
                     if "amount" not in s:
                         s["amount"] = 1
 
-            # ═══ FIX: navigate must have url field ═══
             if "navigate" in act and isinstance(act["navigate"], dict):
                 nv = act["navigate"]
                 for old in ("link", "address", "website", "page", "target"):
                     if old in nv and "url" not in nv:
                         nv["url"] = nv.pop(old)
 
-            # ═══ FIX: go_back / close must be empty dicts ═══
+      
             if "go_back" in act and not isinstance(act["go_back"], dict):
                 act["go_back"] = {}
             if "close" in act and not isinstance(act["close"], dict):
                 act["close"] = {}
 
-            # ═══ FIX: switch must have handle ═══
+
             if "switch" in act and isinstance(act["switch"], dict):
                 sw = act["switch"]
                 if "handle" not in sw:
@@ -116,7 +104,6 @@ def fix_glm_response(content):
                     if "handle" not in sw:
                         act.pop("switch", None)
 
-            # ═══ Existing fixes (unchanged) ═══
             if "search_page" in act and isinstance(act["search_page"], dict):
                 sp = act["search_page"]
                 for old in ("query", "search_term", "text", "q", "keyword"):
@@ -172,9 +159,6 @@ def _fix_resp(resp):
     except: pass
     return resp
 
-# ═══════════════════════════════════════════════════════════════════════════
-# LLMFixer wrapper (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════
 class LLMFixer:
     def __init__(self, llm):
         object.__setattr__(self,"_llm",llm)
@@ -193,9 +177,6 @@ class LLMFixer:
         if n in ("provider","model","model_name"): object.__setattr__(self,n,v)
         else: setattr(self._llm,n,v)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Action Cache — skip LLM call when same page state seen before
-# ═══════════════════════════════════════════════════════════════════════════
 class ActionCache:
     """Cache LLM responses based on URL + DOM fingerprint + task hash."""
     def __init__(self, max_size=50):
@@ -205,7 +186,7 @@ class ActionCache:
         self._misses = 0
 
     def _key(self, url, dom_text, task):
-        # Hash: URL + first/last 300 chars of DOM + first 80 chars of task
+
         fingerprint = f"{url}|{dom_text[:300]}|{dom_text[-300:]}|{task[:80]}"
         return hashlib.md5(fingerprint.encode()).hexdigest()
 
@@ -222,20 +203,16 @@ class ActionCache:
     def set(self, url, dom_text, task, response_content):
         k = self._key(url, dom_text, task)
         self._cache[k] = response_content
-        # Evict oldest if over capacity
+
         if len(self._cache) > self._max:
             self._cache.pop(next(iter(self._cache)))
 
     def stats(self):
         return f"cache: {self._hits} hits, {self._misses} misses, {len(self._cache)} entries"
 
-# Global cache
 _action_cache = ActionCache()
 
-# ═══════════════════════════════════════════════════════════════════════════
-# LLM factory — browser-use ChatOpenAI subclass with thinking disabled
-# + streaming + connection pre-warming
-# ═══════════════════════════════════════════════════════════════════════════
+
 def create_llm(api_key, base_url, model):
     bu_cls = None
     for mp in ("browser_use.llm", "browser_use.llm.openai"):
@@ -256,7 +233,7 @@ def create_llm(api_key, base_url, model):
                 eb["enable_thinking"] = False
                 eb["thinking"] = False
                 kwargs["extra_body"] = eb
-                # B2: Enable streaming for faster TTFB
+
                 kwargs.setdefault("stream", True)
                 try:
                     return await super()._agenerate(*args, **kwargs)
@@ -286,12 +263,12 @@ def create_llm(api_key, base_url, model):
             try:
                 llm = FastBUChatOpenAI(**kw)
                 _ = llm.provider
-                # A4: max_tokens=1024 (was 512) for multi-action responses
+
                 try: llm.max_tokens = 1024
                 except:
                     try: object.__setattr__(llm, "max_tokens", 1024)
                     except: pass
-                # B2: Enable streaming on the model itself
+
                 try: llm.streaming = True
                 except:
                     try: object.__setattr__(llm, "streaming", True)
@@ -300,7 +277,6 @@ def create_llm(api_key, base_url, model):
                 return LLMFixer(llm)
             except TypeError: continue
 
-        # Fallback: plain browser-use ChatOpenAI
         for kw in [
             dict(model=model, api_key=api_key, base_url=base_url, temperature=0.0),
             dict(model=model, api_key=api_key, base_url=base_url),
@@ -315,9 +291,6 @@ def create_llm(api_key, base_url, model):
     logger.warning("Using custom GLMChatModel wrapper")
     return LLMFixer(GLMChatModel(model, api_key, base_url))
 
-# ═══════════════════════════════════════════════════════════════════════════
-# A3: Connection pre-warming
-# ═══════════════════════════════════════════════════════════════════════════
 async def prewarm_llm(llm):
     """Send minimal request to warm TCP/TLS connection + model cache."""
     try:
@@ -330,23 +303,20 @@ async def prewarm_llm(llm):
         logger.warning(f"Pre-warm failed (ok to ignore): {e}")
         return None
 
-# ═══════════════════════════════════════════════════════════════════════════
-# B1: Resource blocking via CDP
-# ═══════════════════════════════════════════════════════════════════════════
 async def block_resources(session):
     """Block fonts, analytics, ads, social widgets to speed up page loads."""
     blocked = [
-        # Fonts
+
         "*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
-        # Analytics & tracking
+
         "*google-analytics.com*", "*googletagmanager.com*",
         "*doubleclick.net*", "*connect.facebook.net*",
         "*platform.twitter.com*", "*analytics*",
         "*hotjar.com*", "*clarity.ms*", "*segment.io*",
         "*mixpanel.com*", "*amplitude.com*",
-        # Ad networks
+
         "*googleads*", "*adservice*", "*adnxs*",
-        # Social embeds
+
         "*platform.linkedin.com*", "*addthis.com*",
     ]
     cdp = None
@@ -373,9 +343,7 @@ async def block_resources(session):
                 continue
     logger.info("ℹ️ Could not block resources (CDP method not found)")
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Custom LLM wrapper (Tier 3 — with thinking disabled + HTTP/2)
-# ═══════════════════════════════════════════════════════════════════════════
+
 class GLMChatModel:
     def __init__(self, model, api_key, base_url, temp=0.0, max_tokens=1024):
         self.model = model; self.model_name = model
@@ -463,7 +431,6 @@ class _Resp:
         if update: r.content = update.get("content",r.content); r.completion = r.content
         return r
 
-# ═══════════════════════════════════════════════════════════════════════════
 def imp(paths):
     for mp, cn in paths:
         try:
@@ -472,9 +439,6 @@ def imp(paths):
         except: pass
     return None
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Task preprocessing (unchanged from working version)
-# ═══════════════════════════════════════════════════════════════════════════
 def preprocess_task(task):
     t = task.lower()
     if "youtube" in t and ("channel" in t or "video" in t):
@@ -504,9 +468,6 @@ def preprocess_task(task):
         return f"Go to {url} — {task}"
     return task
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Main agent — with all optimizations
-# ═══════════════════════════════════════════════════════════════════════════
 class ZAIBrowserAgent:
     def __init__(self):
         load_dotenv()
